@@ -1,0 +1,416 @@
+--- /dev/null	2021-10-25 08:23:06.499675237 +0100
++++ annobin-8.79/tests/unicode-test	2021-10-25 12:37:55.699238393 +0100
+@@ -0,0 +1,41 @@
++#!/bin/bash
++
++# Copyright (c) 2021 Red Hat.
++#
++# This is free software; you can redistribute it and/or modify it
++# under the terms of the GNU General Public License as published
++# by the Free Software Foundation; either version 3, or (at your
++# option) any later version.
++#
++# It is distributed in the hope that it will be useful, but
++# WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++
++ANNOCHECK=${ANNOCHECK:-../annocheck/annocheck}
++GCC=${GCC:-gcc}
++
++# Mimics how glibc builds C sources without annotation.
++
++OPTS="-O2 -g -Wl,-z,now -pie -fpie"
++
++$GCC $OPTS $srcdir/trick-hello.s -o trick-hello.exe
++if [ $? != 0 ];
++then
++    echo "unicode-test: FAIL: Could not compile test source file"
++    exit 1
++fi
++
++# Run annocheck
++
++OPTS="--ignore-gaps --skip-cf-protection --skip-glibcxx-assertions --skip-short-enum --skip-optimization --skip-stack-prot"
++
++$ANNOCHECK trick-hello.exe $OPTS > unicode.out
++grep -e "FAIL: Symbol names containing multibyte characters" unicode.out
++if [ $? != 0 ];
++then
++    echo "unicode-test: FAIL: annocheck did not detect suspicious symbol names"
++    $ANNOCHECK trick-hello.exe $OPTS --verbose
++    exit 1
++fi
++
+--- /dev/null	2021-10-25 08:23:06.499675237 +0100
++++ annobin-8.79/tests/trick-hello.s	2021-10-25 15:10:39.722116284 +0100
+@@ -0,0 +1,33 @@
++	.file	"trick-hello.c"
++	.text
++	.section	.rodata
++.LC0:
++	.string	"hah, gotcha!"
++	.text
++	.globl	he‮oll‬
++	.type	he‮oll‬, @function
++he‮oll‬:
++.LFB0:
++	nop
++.LFE0:
++	.size	he‮oll‬, .-he‮oll‬
++	.section	.rodata
++.LC1:
++	.string	"Hello world"
++	.text
++	.globl	hello
++	.type	hello, @function
++hello:
++.LFB1:
++	nop
++.LFE1:
++	.size	hello, .-hello
++	.globl	main
++	.type	main, @function
++main:
++.LFB2:
++	nop
++.LFE2:
++	.size	main, .-main
++	.ident	"GCC: (GNU) 11.2.1 20210728 (Red Hat 11.2.1-1)"
++	.section	.note.GNU-stack,"",@progbits
+diff -rup annobin.orig/Makefile.in annobin-9.29/Makefile.in
+--- annobin.orig/Makefile.in	2021-10-28 10:31:57.060267035 +0100
++++ annobin-9.29/Makefile.in	2021-10-28 10:32:06.211206161 +0100
+@@ -323,6 +323,7 @@ plugindir = @plugindir@
+ prefix = @prefix@
+ program_transform_name = @program_transform_name@
+ psdir = @psdir@
++runstatedir = @runstatedir@
+ sbindir = @sbindir@
+ sharedstatedir = @sharedstatedir@
+ srcdir = @srcdir@
+Only in annobin-9.29: Makefile.in.orig
+diff -rup annobin.orig/annocheck/Makefile.in annobin-9.29/annocheck/Makefile.in
+--- annobin.orig/annocheck/Makefile.in	2021-10-28 10:31:57.088266849 +0100
++++ annobin-9.29/annocheck/Makefile.in	2021-10-28 10:32:06.212206154 +0100
+@@ -314,6 +314,7 @@ plugindir = @plugindir@
+ prefix = @prefix@
+ program_transform_name = @program_transform_name@
+ psdir = @psdir@
++runstatedir = @runstatedir@
+ sbindir = @sbindir@
+ sharedstatedir = @sharedstatedir@
+ srcdir = @srcdir@
+Only in annobin-9.29/annocheck: Makefile.in.orig
+diff -rup annobin.orig/annocheck/hardened.c annobin-9.29/annocheck/hardened.c
+--- annobin.orig/annocheck/hardened.c	2021-10-28 10:31:57.088266849 +0100
++++ annobin-9.29/annocheck/hardened.c	2021-10-28 10:33:13.936755663 +0100
+@@ -119,6 +119,7 @@ enum test_index
+   TEST_STACK_REALIGN,
+   TEST_TEXTREL,
+   TEST_THREADS,
++  TEST_UNICODE,
+   TEST_WARNINGS,
+   TEST_WRITEABLE_GOT,
+ 
+@@ -146,6 +147,7 @@ static void show_STACK_PROT         (ann
+ static void show_STACK_REALIGN      (annocheck_data *, test *);
+ static void show_TEXTREL            (annocheck_data *, test *);
+ static void show_THREADS            (annocheck_data *, test *);
++static void show_UNICODE            (annocheck_data *, test *);
+ static void show_WARNINGS           (annocheck_data *, test *);
+ static void show_WRITEABLE_GOT      (annocheck_data *, test *);
+ 
+@@ -177,6 +179,7 @@ static test tests [TEST_MAX] =
+   TEST (stack-realign,      STACK_REALIGN,      "Compiled with -mstackrealign (i686 only)"),
+   TEST (textrel,            TEXTREL,            "There are no text relocations in the binary"),
+   TEST (threads,            THREADS,            "Compiled with -fexceptions"),
++  TEST (unicode,            UNICODE,            "No unicode symbol names"),
+   TEST (warnings,           WARNINGS,           "Compiled with -Wall"),
+   TEST (writeable-got,      WRITEABLE_GOT,      "The .got section is not writeable"),
+ };
+@@ -288,6 +291,11 @@ interesting_sec (annocheck_data *     da
+   if (streq (sec->secname, ".gdb_index"))
+     per_file.debuginfo_file = true;
+ 
++  if (tests[TEST_UNICODE].enabled
++      && (sec->shdr.sh_type == SHT_SYMTAB
++	  || sec->shdr.sh_type == SHT_DYNSYM))	  
++    return true;
++
+   if (streq (sec->secname, ".text"))
+     {
+       /* Separate debuginfo files have a .text section with a non-zero
+@@ -1830,6 +1838,64 @@ check_comment_section (annocheck_data *
+ }
+ 
+ static bool
++contains_suspicious_characters (const unsigned char * name)
++{
++  uint i;
++  uint len = strlen ((const char *) name);
++
++  /* FIXME: Test that locale is UTF-8.  */
++
++  for (i = 0; i < len; i++)
++    {
++      unsigned char c = name[i];
++
++      if (isgraph (c))
++	continue;
++
++      /* Control characters are always suspect.  So are spaces and DEL  */
++      if (iscntrl (c) || c == ' ' || c == 0x7f)
++	return true;
++
++      if (c < 0x7f) /* This test is probably redundant.  */
++	continue;
++
++      return true;
++    }
++
++  return false;
++}
++
++static bool
++check_symbol_section (annocheck_data * data, annocheck_section * sec)
++{
++  if (! tests[TEST_UNICODE].enabled)
++    return true;
++
++  /* Scan the symbols looking for non-ASCII characters in their names
++     that might cause problems.  Note - we do not examine the string
++     tables directly as there are perfectly legitimate reasons why these
++     characters might appear in strings.  But when they are used for
++     identifier names, their use is ... problematic.  */
++  GElf_Sym  sym;
++  uint      symndx;
++
++  for (symndx = 1; gelf_getsym (sec->data, symndx, & sym) != NULL; symndx++)
++    {
++      const char * symname = elf_strptr (data->elf, sec->shdr.sh_link, sym.st_name);
++
++      if (contains_suspicious_characters ((const unsigned char *) symname))
++	{
++	  tests[TEST_UNICODE].num_fail ++;
++	  einfo (VERBOSE, "%s: info: multibyte symname: '%s', (%lu bytes long) in section: %s",
++		 data->filename, symname, (unsigned long) strlen (symname), sec->secname);
++	  if (!BE_VERBOSE)
++	    break;
++	}
++    }
++  return true;
++}
++
++static bool
+ check_sec (annocheck_data *     data,
+ 	   annocheck_section *  sec)
+ {
+@@ -1837,6 +1903,8 @@ check_sec (annocheck_data *     data,
+      selected in interesting_sec().  */
+   switch (sec->shdr.sh_type)
+     {
++    case SHT_SYMTAB:
++    case SHT_DYNSYM:   return check_symbol_section (data, sec);
+     case SHT_NOTE:     return check_note_section (data, sec);
+     case SHT_STRTAB:   return check_string_section (data, sec);
+     case SHT_DYNAMIC:  return check_dynamic_section (data, sec);
+@@ -2617,6 +2685,19 @@ show_BRANCH_PROTECTION  (annocheck_data
+     }
+ }
+ 
++static void
++show_UNICODE (annocheck_data * data, test * results)
++{
++  if (results->num_fail > 0)
++    {
++      fail (data, "Symbol names containing multibyte characters detected");
++    }
++  else
++    {
++      pass (data, "No symbol names containing multibyte characters detected");
++    }
++}
++
+ static void
+ show_ENTRY (annocheck_data * data, test * results)
+ {
+Only in annobin-9.29/annocheck: hardened.c.orig
+Only in annobin-9.29/annocheck: hardened.c.rej
+Only in annobin-9.29: autom4te.cache
+diff -rup annobin.orig/configure annobin-9.29/configure
+--- annobin.orig/configure	2021-10-28 10:31:57.060267035 +0100
++++ annobin-9.29/configure	2021-10-28 10:32:06.215206134 +0100
+@@ -761,6 +761,7 @@ infodir
+ docdir
+ oldincludedir
+ includedir
++runstatedir
+ localstatedir
+ sharedstatedir
+ sysconfdir
+@@ -857,6 +858,7 @@ datadir='${datarootdir}'
+ sysconfdir='${prefix}/etc'
+ sharedstatedir='${prefix}/com'
+ localstatedir='${prefix}/var'
++runstatedir='${localstatedir}/run'
+ includedir='${prefix}/include'
+ oldincludedir='/usr/include'
+ docdir='${datarootdir}/doc/${PACKAGE_TARNAME}'
+@@ -1109,6 +1111,15 @@ do
+   | -silent | --silent | --silen | --sile | --sil)
+     silent=yes ;;
+ 
++  -runstatedir | --runstatedir | --runstatedi | --runstated \
++  | --runstate | --runstat | --runsta | --runst | --runs \
++  | --run | --ru | --r)
++    ac_prev=runstatedir ;;
++  -runstatedir=* | --runstatedir=* | --runstatedi=* | --runstated=* \
++  | --runstate=* | --runstat=* | --runsta=* | --runst=* | --runs=* \
++  | --run=* | --ru=* | --r=*)
++    runstatedir=$ac_optarg ;;
++
+   -sbindir | --sbindir | --sbindi | --sbind | --sbin | --sbi | --sb)
+     ac_prev=sbindir ;;
+   -sbindir=* | --sbindir=* | --sbindi=* | --sbind=* | --sbin=* \
+@@ -1246,7 +1257,7 @@ fi
+ for ac_var in	exec_prefix prefix bindir sbindir libexecdir datarootdir \
+ 		datadir sysconfdir sharedstatedir localstatedir includedir \
+ 		oldincludedir docdir infodir htmldir dvidir pdfdir psdir \
+-		libdir localedir mandir
++		libdir localedir mandir runstatedir
+ do
+   eval ac_val=\$$ac_var
+   # Remove trailing slashes.
+@@ -1399,6 +1410,7 @@ Fine tuning of the installation director
+   --sysconfdir=DIR        read-only single-machine data [PREFIX/etc]
+   --sharedstatedir=DIR    modifiable architecture-independent data [PREFIX/com]
+   --localstatedir=DIR     modifiable single-machine data [PREFIX/var]
++  --runstatedir=DIR       modifiable per-process data [LOCALSTATEDIR/run]
+   --libdir=DIR            object code libraries [EPREFIX/lib]
+   --includedir=DIR        C header files [PREFIX/include]
+   --oldincludedir=DIR     C header files for non-gcc [/usr/include]
+Only in annobin-9.29: configure.orig
+diff -rup annobin.orig/doc/Makefile.in annobin-9.29/doc/Makefile.in
+--- annobin.orig/doc/Makefile.in	2021-10-28 10:31:57.061267029 +0100
++++ annobin-9.29/doc/Makefile.in	2021-10-28 10:32:06.215206134 +0100
+@@ -329,6 +329,7 @@ plugindir = @plugindir@
+ prefix = @prefix@
+ program_transform_name = @program_transform_name@
+ psdir = @psdir@
++runstatedir = @runstatedir@
+ sbindir = @sbindir@
+ sharedstatedir = @sharedstatedir@
+ srcdir = @srcdir@
+Only in annobin-9.29/doc: Makefile.in.orig
+diff -rup annobin.orig/doc/annobin.info annobin-9.29/doc/annobin.info
+--- annobin.orig/doc/annobin.info	2021-10-28 10:31:57.061267029 +0100
++++ annobin-9.29/doc/annobin.info	2021-10-28 10:32:06.215206134 +0100
+@@ -609,6 +609,7 @@ File: annobin.info,  Node: Hardened,  Ne
+        [-skip-stack-realign]
+        [-skip-textrel]
+        [-skip-threads]
++       [-skip-unicode]
+        [-skip-writeable-got]
+        [-ignore-gaps]
+        [-disable-hardened]
+@@ -718,6 +719,10 @@ code to support the test.
+      Check that the program makes consistent use of the '-fshort-enum'
+      option.
+ 
++'Unicode'
++     This test checks for the presence of multibyte characters in symbol
++     names, which are unusual and potentially dangerous.
++
+    The tool does support a couple of other command line options as well:
+ 
+ '--enable-hardened'
+Only in annobin-9.29/doc: annobin.info.orig
+Only in annobin-9.29/doc: annobin.info.rej
+diff -rup annobin.orig/doc/annobin.texi annobin-9.29/doc/annobin.texi
+--- annobin.orig/doc/annobin.texi	2021-10-28 10:31:57.061267029 +0100
++++ annobin-9.29/doc/annobin.texi	2021-10-28 10:32:06.215206134 +0100
+@@ -706,6 +706,7 @@ annocheck
+   [@b{--skip-stack-realign}]
+   [@b{--skip-textrel}]
+   [@b{--skip-threads}]
++  [@b{--skip-unicode}]
+   [@b{--skip-writeable-got}]
+   [@b{--ignore-gaps}]
+   [@b{--disable-hardened}]
+@@ -831,6 +832,10 @@ enabled then this test will be skipped a
+ Check that the program makes consistent use of the
+ @option{-fshort-enum} option.
+ 
++@item Unicode
++This test checks for the presence of multibyte characters in symbol
++names, which are unusual and potentially dangerous.
++
+ @end table
+ 
+ The tool does support a couple of other command line options as well:
+Only in annobin-9.29/doc: annobin.texi.orig
+diff -rup annobin.orig/scripts/Makefile.in annobin-9.29/scripts/Makefile.in
+--- annobin.orig/scripts/Makefile.in	2021-10-28 10:31:57.061267029 +0100
++++ annobin-9.29/scripts/Makefile.in	2021-10-28 10:32:08.111193522 +0100
+@@ -284,6 +284,7 @@ plugindir = @plugindir@
+ prefix = @prefix@
+ program_transform_name = @program_transform_name@
+ psdir = @psdir@
++runstatedir = @runstatedir@
+ sbindir = @sbindir@
+ sharedstatedir = @sharedstatedir@
+ srcdir = @srcdir@
+Only in annobin-9.29/scripts: Makefile.in.orig
+diff -rup annobin.orig/tests/Makefile.am annobin-9.29/tests/Makefile.am
+--- annobin.orig/tests/Makefile.am	2021-10-28 10:31:57.089266843 +0100
++++ annobin-9.29/tests/Makefile.am	2021-10-28 10:33:47.008535672 +0100
+@@ -16,6 +16,7 @@ TESTS=compile-test \
+       assembler-gap-test \
+       dynamic-notes-test \
+       instrumentation-test \
++      unicode-test \
+       section-size-test
+ 
+ if HAVE_DEBUGINFOD
+Only in annobin-9.29/tests: Makefile.am.orig
+Only in annobin-9.29/tests: Makefile.am.rej
+diff -rup annobin.orig/tests/Makefile.in annobin-9.29/tests/Makefile.in
+--- annobin.orig/tests/Makefile.in	2021-10-28 10:31:57.089266843 +0100
++++ annobin-9.29/tests/Makefile.in	2021-10-28 10:34:15.803344120 +0100
+@@ -459,6 +459,7 @@ plugindir = @plugindir@
+ prefix = @prefix@
+ program_transform_name = @program_transform_name@
+ psdir = @psdir@
++runstatedir = @runstatedir@
+ sbindir = @sbindir@
+ sharedstatedir = @sharedstatedir@
+ srcdir = @srcdir@
+@@ -477,7 +478,8 @@ top_srcdir = @top_srcdir@
+ TESTS = compile-test hardening-test hardening-fail-test \
+ 	missing-notes-test active-checks-test abi-test \
+ 	function-sections-test assembler-gap-test dynamic-notes-test \
+-	instrumentation-test section-size-test $(am__append_1)
++	instrumentation-test unicode-test section-size-test \
++	$(am__append_1)
+ XFAIL_TESTS = hardening-fail-test \
+       missing-notes-test \
+       active-checks-test \
+@@ -739,6 +741,13 @@ instrumentation-test.log: instrumentatio
+ 	$(am__check_pre) $(LOG_DRIVER) --test-name "$$f" \
+ 	--log-file $$b.log --trs-file $$b.trs \
+ 	$(am__common_driver_flags) $(AM_LOG_DRIVER_FLAGS) $(LOG_DRIVER_FLAGS) -- $(LOG_COMPILE) \
++	"$$tst" $(AM_TESTS_FD_REDIRECT)
++unicode-test.log: unicode-test
++	@p='unicode-test'; \
++	b='unicode-test'; \
++	$(am__check_pre) $(LOG_DRIVER) --test-name "$$f" \
++	--log-file $$b.log --trs-file $$b.trs \
++	$(am__common_driver_flags) $(AM_LOG_DRIVER_FLAGS) $(LOG_DRIVER_FLAGS) -- $(LOG_COMPILE) \
+ 	"$$tst" $(AM_TESTS_FD_REDIRECT)
+ section-size-test.log: section-size-test
+ 	@p='section-size-test'; \
+Only in annobin-9.29/tests: Makefile.in.orig
+Only in annobin-9.29/tests: Makefile.in.rej
+Only in annobin-9.29/tests: trick-hello.s
+Only in annobin-9.29/tests: unicode-test
